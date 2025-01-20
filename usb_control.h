@@ -14,6 +14,10 @@
 #define VENDOR_ID  0x1733
 #define PRODUCT_ID 0xAABB
 
+// Max string length
+#define MAX_STR_LENGTH 256
+#define MAX_DEVICES 16  // 最大设备数量
+
 // USB types
 typedef void* libusb_context;
 typedef struct libusb_device libusb_device;
@@ -36,6 +40,13 @@ struct libusb_device_descriptor {
     uint8_t  iSerialNumber;
     uint8_t  bNumConfigurations;
 };
+
+// Device info structure
+typedef struct {
+    char serial[MAX_STR_LENGTH];
+    char manufacturer[MAX_STR_LENGTH];
+    char product[MAX_STR_LENGTH];
+} device_info_t;
 
 // Function types
 typedef int (*libusb_init_t)(libusb_context**);
@@ -71,7 +82,9 @@ typedef int (*libusb_get_string_descriptor_ascii_t)(libusb_device_handle*, uint8
 extern const char* libusb_error_name(int error_code);
 int usb_control_init(void);
 void usb_control_exit(void);
-int usb_control_open(void);
+int usb_control_get_serial(device_info_t* devices, int max_devices);  // 返回找到的设备数量
+int usb_control_open_by_serial(const char* target_serial);  // 如果target_serial为NULL，打开第一个设备
 int usb_control_close(void);
+int usb_control_read(unsigned char* data, int length, int* transferred);
 
 #endif // USB_CONTROL_H
