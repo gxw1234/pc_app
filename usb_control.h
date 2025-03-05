@@ -8,7 +8,11 @@
 #include <windows.h>
 
 // DLL path
-#define LIBUSB_DLL_PATH "libs/windows/x86_64/libusb-1.0.dll"
+// #define LIBUSB_DLL_PATH "libs/windows/x86_64/libusb-1.0.dll"
+
+#define LIBUSB_DLL_PATH "libusb-1.0.dll"
+
+
 
 // Device IDs
 #define VENDOR_ID  0x1733
@@ -43,7 +47,7 @@ struct libusb_device_descriptor {
 
 // Device info structure
 typedef struct {
-    char serial[MAX_STR_LENGTH];
+    unsigned char serial[MAX_STR_LENGTH];  // 使用 unsigned char 确保是字节数组
     char manufacturer[MAX_STR_LENGTH];
     char product[MAX_STR_LENGTH];
 } device_info_t;
@@ -82,9 +86,9 @@ typedef int (*libusb_get_string_descriptor_ascii_t)(libusb_device_handle*, uint8
 extern const char* libusb_error_name(int error_code);
 int usb_control_init(void);
 void usb_control_exit(void);
-int USB_ScanDevice(device_info_t* devices, int max_devices);  // 返回找到的设备数量
-int USB_OpenDevice(const char* target_serial);  // 如果target_serial为NULL，打开第一个设备
-int USB_CloseDevice(void);
+int usb_control_scan_device(device_info_t* devices, int max_devices);  // 返回找到的设备数量
+int usb_control_open_device(const char* target_serial);  // 如果target_serial为NULL，打开第一个设备
+int usb_control_close_device(void);
 int usb_control_read(unsigned char* data, int length, int* transferred);
 
 #endif // USB_CONTROL_H
