@@ -1,0 +1,1 @@
+# 编译命令： gcc -o usb_control.exe main.c usb_control.c

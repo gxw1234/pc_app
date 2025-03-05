@@ -82,9 +82,9 @@ typedef int (*libusb_get_string_descriptor_ascii_t)(libusb_device_handle*, uint8
 extern const char* libusb_error_name(int error_code);
 int usb_control_init(void);
 void usb_control_exit(void);
-int usb_control_get_serial(device_info_t* devices, int max_devices);  // 返回找到的设备数量
-int usb_control_open_by_serial(const char* target_serial);  // 如果target_serial为NULL，打开第一个设备
-int usb_control_close(void);
+int USB_ScanDevice(device_info_t* devices, int max_devices);  // 返回找到的设备数量
+int USB_OpenDevice(const char* target_serial);  // 如果target_serial为NULL，打开第一个设备
+int USB_CloseDevice(void);
 int usb_control_read(unsigned char* data, int length, int* transferred);
 
 #endif // USB_CONTROL_H

@@ -127,7 +127,7 @@ void usb_control_exit(void) {
 
 
 /* 获取USB vad  0x1733 pad 0xAABB 设备序列号 */
-int usb_control_get_serial(device_info_t* devices, int max_devices) {
+int USB_ScanDevice(device_info_t* devices, int max_devices) {
     if (devices == NULL || max_devices <= 0) {
         return LIBUSB_ERROR_INVALID_PARAM;
     }
@@ -183,12 +183,12 @@ int usb_control_get_serial(device_info_t* devices, int max_devices) {
                 continue;
             }
 
-            printf("Device %d:\n", found + 1);
-            printf("  VID/PID: 0x%04x/0x%04x\n", desc.idVendor, desc.idProduct);
-            printf("  Manufacturer: %s\n", dev_info->manufacturer);
-            printf("  Product: %s\n", dev_info->product);
-            printf("  S/N: %s\n", dev_info->serial);
-            printf("\n");
+            // printf("Device %d:\n", found + 1);
+            // printf("  VID/PID: 0x%04x/0x%04x\n", desc.idVendor, desc.idProduct);
+            // printf("  Manufacturer: %s\n", dev_info->manufacturer);
+            // printf("  Product: %s\n", dev_info->product);
+            // printf("  S/N: %s\n", dev_info->serial);
+            // printf("\n");
 
             found++;
         }
@@ -207,7 +207,7 @@ int usb_control_get_serial(device_info_t* devices, int max_devices) {
 }
 
 /* 打开SN */
-int usb_control_open_by_serial(const char* target_serial) {
+int USB_OpenDevice(const char* target_serial) {
     libusb_device** devs;
     libusb_device* dev;
     struct libusb_device_descriptor desc;
@@ -276,7 +276,7 @@ int usb_control_open_by_serial(const char* target_serial) {
                 r = libusb_bulk_transfer(dev_handle, 0x01, &data, 1, &transferred, 0);
                 if (r < 0) {
                     printf("Failed to send open command: %s\n", libusb_error_name(r));
-                    usb_control_close();
+                    USB_CloseDevice();
                     libusb_free_device_list(devs, 1);
                     return r;
                 }
@@ -323,8 +323,6 @@ int usb_control_open(const char* target_serial) {
             printf("Failed to get device descriptor: %s\n", libusb_error_name(r));
             continue;
         }
-
-        printf("Device %d: VID=0x%04x, PID=0x%04x", i, desc.idVendor, desc.idProduct);
 
         // Check if this is our target device by VID/PID
         if (desc.idVendor == VENDOR_ID && desc.idProduct == PRODUCT_ID) {
@@ -390,7 +388,7 @@ int usb_control_open(const char* target_serial) {
     r = libusb_bulk_transfer(dev_handle, 0x01, &data, 1, &transferred, 0);
     if (r < 0) {
         printf("Failed to send open command: %s\n", libusb_error_name(r));
-        usb_control_close();
+        USB_CloseDevice();
         return r;
     }
     printf("Device opened successfully (transferred %d bytes)\n", transferred);
@@ -408,7 +406,7 @@ int usb_control_read(unsigned char* data, int length, int* transferred) {
 }
 
 /* 关闭设备 */
-int usb_control_close(void) {
+int USB_CloseDevice(void) {
     if (!dev_handle) {
         return LIBUSB_ERROR_NOT_FOUND;
     }

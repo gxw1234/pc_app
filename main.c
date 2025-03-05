@@ -12,7 +12,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Get all matching devices
-    r = usb_control_get_serial(devices, MAX_DEVICES);
+    r = USB_ScanDevice(devices, MAX_DEVICES);
     if (r < 0) {
         printf("Failed to get device list: %s\n", libusb_error_name(r));
         usb_control_exit();
@@ -46,7 +46,7 @@ int main(int argc, char* argv[]) {
            selected_device + 1, devices[selected_device].serial);
 
            
-    r = usb_control_open_by_serial(devices[selected_device].serial);
+    r = USB_OpenDevice(devices[selected_device].serial);
     if (r < 0) {
         usb_control_exit();
         return r;
@@ -79,7 +79,7 @@ int main(int argc, char* argv[]) {
     Sleep(2000);
 
     // Close device
-    r = usb_control_close();
+    r = USB_CloseDevice();
     if (r < 0) {
         usb_control_exit();
         return r;
