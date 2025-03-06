@@ -28,6 +28,8 @@ __declspec(dllexport) int USB_CloseDevice(const char* target_serial) {
     return usb_control_close_device(target_serial);
 }
 
-__declspec(dllexport) int USB_ReadData(const char* target_serial, unsigned char* data, int length, int* transferred) {
-    return usb_control_read(target_serial, data, length, transferred);
+__declspec(dllexport) int USB_ReadData(const char* target_serial, unsigned char* data, int length) {
+    int transferred = 0;
+    int result = usb_control_read(target_serial, data, length, &transferred);
+    return (result >= 0) ? transferred : result;  // 如果成功返回读取的字节数，失败返回错误码
 }

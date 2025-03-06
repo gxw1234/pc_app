@@ -18,6 +18,11 @@
 #define MAX_STR_LENGTH 256
 #define MAX_DEVICES 16  // 最大设备数量
 
+// 环形缓冲区大小
+#define RING_BUFFER_SIZE 4096  
+// USB包大小
+#define USB_PACKET_SIZE 64     
+
 // USB types
 typedef void* libusb_context;
 typedef struct libusb_device libusb_device;
@@ -48,11 +53,22 @@ typedef struct {
     char product[MAX_STR_LENGTH];
 } device_info_t;
 
+// Ring buffer structure
+typedef struct {
+    unsigned char buffer[RING_BUFFER_SIZE];
+    volatile int head;         // 写入位置
+    volatile int tail;         // 读取位置
+    volatile int count;        // 当前数据量
+} ring_buffer_t;
+
 // Device instance structure
 typedef struct {
     libusb_device_handle* handle;
     char serial[MAX_STR_LENGTH];
     int in_use;
+    ring_buffer_t rx_buffer;   // 接收缓冲区
+    HANDLE rx_thread;          // 接收线程句柄
+    volatile int rx_running;   // 接收线程运行标志
 } device_instance_t;
 
 // Function types
@@ -67,6 +83,7 @@ typedef int (*libusb_set_configuration_t)(libusb_device_handle*, int);
 typedef int (*libusb_claim_interface_t)(libusb_device_handle*, int);
 typedef int (*libusb_release_interface_t)(libusb_device_handle*, int);
 typedef int (*libusb_bulk_transfer_t)(libusb_device_handle*, unsigned char, unsigned char*, int, int*, unsigned int);
+typedef int (*libusb_interrupt_transfer_t)(libusb_device_handle*, unsigned char, unsigned char*, int, int*, unsigned int);
 typedef int (*libusb_get_string_descriptor_ascii_t)(libusb_device_handle*, uint8_t, unsigned char*, int);
 
 // Error codes
@@ -93,5 +110,7 @@ int usb_control_scan_device(device_info_t* devices, int max_devices);  // 返回
 int usb_control_open_device(const char* target_serial);  // 打开指定序列号的设备
 int usb_control_close_device(const char* target_serial); // 关闭指定序列号的设备
 int usb_control_read(const char* target_serial, unsigned char* data, int length, int* transferred); // 从指定序列号的设备读取数据
+int usb_control_start_rx(const char* target_serial);  // 启动接收
+int usb_control_stop_rx(const char* target_serial);   // 停止接收
 
 #endif // USB_CONTROL_H

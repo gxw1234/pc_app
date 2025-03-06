@@ -52,23 +52,25 @@ def main():
         return
     print("\nDevice opened successfully")
 
+
+
+    time.sleep(10)
     try:
         buffer_size = 64
         data_buffer = (c_ubyte * buffer_size)()
-        bytes_transferred = c_int(0)
 
-        for i in range(1):
-            result = dll.USB_ReadData(serial, data_buffer, buffer_size, byref(bytes_transferred))
-            if result < 0:
-                print(f"Failed to read data (error code: {result})")
-                break
 
-            if bytes_transferred.value > 0:
-                print(f"\nReceived {bytes_transferred.value} bytes:")
-                hex_data = ' '.join([f'{b:02X}' for b in data_buffer[:bytes_transferred.value]])
-                print(f"Data: {hex_data}")
+        bytes_read = dll.USB_ReadData(serial, data_buffer, buffer_size)
+        if bytes_read < 0:
+            print(f"Failed to read data (error code: {bytes_read})")
 
-            time.sleep(0.1)  # 短暂延时，避免 CPU 占用过高
+
+        if bytes_read > 0:
+            print(f"\nReceived {bytes_read} bytes:")
+            hex_data = ' '.join([f'{b:02X}' for b in data_buffer[:bytes_read]])
+            print(f"Data: {hex_data}")
+
+
 
     except KeyboardInterrupt:
         print("\nTest stopped by user")

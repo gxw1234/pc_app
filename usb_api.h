@@ -20,7 +20,7 @@ extern "C" {
 USB_API int USB_ScanDevice(device_info_t* devices, int max_devices);
 USB_API int USB_OpenDevice(const char* target_serial);  
 USB_API int USB_CloseDevice(const char* target_serial);
-USB_API int USB_ReadData(const char* target_serial, unsigned char* data, int length, int* transferred);
+USB_API int USB_ReadData(const char* target_serial, unsigned char* data, int length);
 
 #ifdef __cplusplus
 }
