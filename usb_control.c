@@ -1,431 +1,381 @@
 #include "usb_control.h"
 
 // Global variables
-static HMODULE dll = NULL;
+static HMODULE libusb_dll = NULL;
 static libusb_context* ctx = NULL;
-static libusb_device_handle* dev_handle = NULL;
+static device_instance_t device_instances[MAX_DEVICES];
 
 // Function pointers
-static libusb_init_t libusb_init = NULL;
-static libusb_exit_t libusb_exit = NULL;
-static libusb_get_device_list_t libusb_get_device_list = NULL;
-static libusb_free_device_list_t libusb_free_device_list = NULL;
-static libusb_get_device_descriptor_t libusb_get_device_descriptor = NULL;
-static libusb_open_t libusb_open = NULL;
-static libusb_close_t libusb_close = NULL;
-static libusb_set_configuration_t libusb_set_configuration = NULL;
-static libusb_claim_interface_t libusb_claim_interface = NULL;
-static libusb_release_interface_t libusb_release_interface = NULL;
-static libusb_bulk_transfer_t libusb_bulk_transfer = NULL;
-static libusb_get_string_descriptor_ascii_t libusb_get_string_descriptor_ascii = NULL;
+static libusb_init_t fn_init;
+static libusb_exit_t fn_exit;
+static libusb_get_device_list_t fn_get_device_list;
+static libusb_free_device_list_t fn_free_device_list;
+static libusb_get_device_descriptor_t fn_get_device_descriptor;
+static libusb_open_t fn_open;
+static libusb_close_t fn_close;
+static libusb_set_configuration_t fn_set_configuration;
+static libusb_claim_interface_t fn_claim_interface;
+static libusb_release_interface_t fn_release_interface;
+static libusb_bulk_transfer_t fn_bulk_transfer;
+static libusb_interrupt_transfer_t fn_interrupt_transfer;
+static libusb_get_string_descriptor_ascii_t fn_get_string_descriptor_ascii;
+
+// Ring buffer operations
+static void ring_buffer_init(ring_buffer_t* rb) {
+    rb->head = 0;
+    rb->tail = 0;
+    rb->count = 0;
+}
+
+static int ring_buffer_write(ring_buffer_t* rb, const unsigned char* data, int length) {
+    int i;
+    for (i = 0; i < length && rb->count < RING_BUFFER_SIZE; i++) {
+        rb->buffer[rb->head] = data[i];
+        rb->head = (rb->head + 1) % RING_BUFFER_SIZE;
+        rb->count++;
+    }
+    return i;  // 返回实际写入的字节数
+}
+
+static int ring_buffer_read(ring_buffer_t* rb, unsigned char* data, int max_length) {
+    int i;
+    for (i = 0; i < max_length && rb->count > 0; i++) {
+        data[i] = rb->buffer[rb->tail];
+        rb->tail = (rb->tail + 1) % RING_BUFFER_SIZE;
+        rb->count--;
+    }
+    return i;  // 返回实际读取的字节数
+}
+
+// Initialize device instances
+static void init_device_instances() {
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        device_instances[i].handle = NULL;
+        device_instances[i].serial[0] = '\0';
+        device_instances[i].in_use = 0;
+        device_instances[i].rx_thread = NULL;
+        device_instances[i].rx_running = 0;
+        ring_buffer_init(&device_instances[i].rx_buffer);
+    }
+}
 
 // Helper function to get device string descriptor
-static int get_string_descriptor(libusb_device_handle* handle, uint8_t desc_index, unsigned char* data, int length) {
-    if (desc_index == 0) return 0;
-    
-    int r = libusb_get_string_descriptor_ascii(handle, desc_index, data, length);
+static int get_string_descriptor(libusb_device_handle* handle, uint8_t desc_index, char* data, int length) {
+    if (desc_index == 0) {
+        data[0] = '\0';  // 确保空描述符返回空字符串
+        return 0;
+    }
+    int r = fn_get_string_descriptor_ascii(handle, desc_index, (unsigned char*)data, length);
     if (r < 0) {
-        printf(" Failed: %s", libusb_error_name(r));
+        printf(" Failed: error code %d", r);
+        data[0] = '\0';  // 错误时返回空字符串
         return r;
     }
+    data[r] = '\0';  // 确保字符串正确终止
     return r;
 }
 
-// Static function declarations
-static const char* error_name(int error_code);
-
-const char* libusb_error_name(int error_code) {
-    return error_name(error_code);
-}
-
-static const char* error_name(int error_code) {
-    switch(error_code) {
-        case LIBUSB_SUCCESS: return "LIBUSB_SUCCESS";
-        case LIBUSB_ERROR_IO: return "LIBUSB_ERROR_IO";
-        case LIBUSB_ERROR_INVALID_PARAM: return "LIBUSB_ERROR_INVALID_PARAM";
-        case LIBUSB_ERROR_ACCESS: return "LIBUSB_ERROR_ACCESS";
-        case LIBUSB_ERROR_NO_DEVICE: return "LIBUSB_ERROR_NO_DEVICE";
-        case LIBUSB_ERROR_NOT_FOUND: return "LIBUSB_ERROR_NOT_FOUND";
-        case LIBUSB_ERROR_BUSY: return "LIBUSB_ERROR_BUSY";
-        case LIBUSB_ERROR_TIMEOUT: return "LIBUSB_ERROR_TIMEOUT";
-        case LIBUSB_ERROR_OVERFLOW: return "LIBUSB_ERROR_OVERFLOW";
-        case LIBUSB_ERROR_PIPE: return "LIBUSB_ERROR_PIPE";
-        case LIBUSB_ERROR_INTERRUPTED: return "LIBUSB_ERROR_INTERRUPTED";
-        case LIBUSB_ERROR_NO_MEM: return "LIBUSB_ERROR_NO_MEM";
-        case LIBUSB_ERROR_NOT_SUPPORTED: return "LIBUSB_ERROR_NOT_SUPPORTED";
-        case LIBUSB_ERROR_OTHER: return "LIBUSB_ERROR_OTHER";
-        default: return "Unknown error";
+// Find device instance by serial number
+static device_instance_t* find_device_instance(const char* target_serial) {
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        if (device_instances[i].in_use && strcmp(device_instances[i].serial, target_serial) == 0) {
+            return &device_instances[i];
+        }
     }
+    return NULL;
 }
 
-//初始化
+// Get free device instance slot
+static device_instance_t* get_free_instance() {
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        if (!device_instances[i].in_use) {
+            return &device_instances[i];
+        }
+    }
+    return NULL;
+}
+
+// USB接收线程函数
+static DWORD WINAPI rx_thread_func(LPVOID param) {
+    device_instance_t* dev = (device_instance_t*)param;
+    unsigned char temp_buffer[USB_PACKET_SIZE];
+    int transferred;
+
+    while (dev->rx_running) {
+        // 使用中断传输而不是批量传输
+        int result = fn_interrupt_transfer(dev->handle, 0x81, temp_buffer, USB_PACKET_SIZE, &transferred, 100);
+        if (result == 0 && transferred > 0) {
+            ring_buffer_write(&dev->rx_buffer, temp_buffer, transferred);
+        }
+    }
+    return 0;
+}
+
 int usb_control_init(void) {
     // Load DLL
-    dll = LoadLibraryA(LIBUSB_DLL_PATH);
-    if (!dll) {
+    libusb_dll = LoadLibraryA(LIBUSB_DLL_PATH);
+    if (!libusb_dll) {
         printf("Failed to load %s\n", LIBUSB_DLL_PATH);
         return -1;
     }
-    printf("Loaded %s\n", LIBUSB_DLL_PATH);
 
     // Get function pointers
-    libusb_init = (libusb_init_t)GetProcAddress(dll, "libusb_init");
-    libusb_exit = (libusb_exit_t)GetProcAddress(dll, "libusb_exit");
-    libusb_get_device_list = (libusb_get_device_list_t)GetProcAddress(dll, "libusb_get_device_list");
-    libusb_free_device_list = (libusb_free_device_list_t)GetProcAddress(dll, "libusb_free_device_list");
-    libusb_get_device_descriptor = (libusb_get_device_descriptor_t)GetProcAddress(dll, "libusb_get_device_descriptor");
-    libusb_open = (libusb_open_t)GetProcAddress(dll, "libusb_open");
-    libusb_close = (libusb_close_t)GetProcAddress(dll, "libusb_close");
-    libusb_set_configuration = (libusb_set_configuration_t)GetProcAddress(dll, "libusb_set_configuration");
-    libusb_claim_interface = (libusb_claim_interface_t)GetProcAddress(dll, "libusb_claim_interface");
-    libusb_release_interface = (libusb_release_interface_t)GetProcAddress(dll, "libusb_release_interface");
-    libusb_bulk_transfer = (libusb_bulk_transfer_t)GetProcAddress(dll, "libusb_bulk_transfer");
-    libusb_get_string_descriptor_ascii = (libusb_get_string_descriptor_ascii_t)GetProcAddress(dll, "libusb_get_string_descriptor_ascii");
-
-    if (!libusb_init || !libusb_exit || !libusb_get_device_list || !libusb_free_device_list || 
-        !libusb_get_device_descriptor || !libusb_open || !libusb_close || !libusb_set_configuration ||
-        !libusb_claim_interface || !libusb_release_interface || !libusb_bulk_transfer ||
-        !libusb_get_string_descriptor_ascii) {
-        printf("Failed to get function pointers\n");
-        FreeLibrary(dll);
-        return -1;
-    }
-    printf("Got function pointers\n");
+    fn_init = (libusb_init_t)GetProcAddress(libusb_dll, "libusb_init");
+    fn_exit = (libusb_exit_t)GetProcAddress(libusb_dll, "libusb_exit");
+    fn_get_device_list = (libusb_get_device_list_t)GetProcAddress(libusb_dll, "libusb_get_device_list");
+    fn_free_device_list = (libusb_free_device_list_t)GetProcAddress(libusb_dll, "libusb_free_device_list");
+    fn_get_device_descriptor = (libusb_get_device_descriptor_t)GetProcAddress(libusb_dll, "libusb_get_device_descriptor");
+    fn_open = (libusb_open_t)GetProcAddress(libusb_dll, "libusb_open");
+    fn_close = (libusb_close_t)GetProcAddress(libusb_dll, "libusb_close");
+    fn_set_configuration = (libusb_set_configuration_t)GetProcAddress(libusb_dll, "libusb_set_configuration");
+    fn_claim_interface = (libusb_claim_interface_t)GetProcAddress(libusb_dll, "libusb_claim_interface");
+    fn_release_interface = (libusb_release_interface_t)GetProcAddress(libusb_dll, "libusb_release_interface");
+    fn_bulk_transfer = (libusb_bulk_transfer_t)GetProcAddress(libusb_dll, "libusb_bulk_transfer");
+    fn_interrupt_transfer = (libusb_interrupt_transfer_t)GetProcAddress(libusb_dll, "libusb_interrupt_transfer");
+    fn_get_string_descriptor_ascii = (libusb_get_string_descriptor_ascii_t)GetProcAddress(libusb_dll, "libusb_get_string_descriptor_ascii");
 
     // Initialize libusb
-    int r = libusb_init(&ctx);
+    int r = fn_init(&ctx);
     if (r < 0) {
-        printf("Init Error: %s\n", libusb_error_name(r));
-        FreeLibrary(dll);
+        printf("Failed to initialize libusb: error code %d\n", r);
+        FreeLibrary(libusb_dll);
         return r;
     }
-    printf("libusb initialized successfully\n");
 
+    // Initialize device instances
+    init_device_instances();
     return 0;
 }
 
-
-
-//清理和释放资源
 void usb_control_exit(void) {
-    if (dev_handle) {
-        libusb_release_interface(dev_handle, 0);
-        libusb_close(dev_handle);
-        dev_handle = NULL;
+    // Close all open devices
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        if (device_instances[i].in_use) {
+            fn_release_interface(device_instances[i].handle, 0);
+            fn_close(device_instances[i].handle);
+            device_instances[i].in_use = 0;
+        }
     }
-    
+
+    // Clean up libusb
     if (ctx) {
-        libusb_exit(ctx);
+        fn_exit(ctx);
         ctx = NULL;
     }
-    
-    if (dll) {
-        FreeLibrary(dll);
-        dll = NULL;
+
+    // Unload DLL
+    if (libusb_dll) {
+        FreeLibrary(libusb_dll);
+        libusb_dll = NULL;
     }
 }
 
-
-/* 获取USB vad  0x1733 pad 0xAABB 设备序列号 */
-int USB_ScanDevice(device_info_t* devices, int max_devices) {
-    if (devices == NULL || max_devices <= 0) {
-        return LIBUSB_ERROR_INVALID_PARAM;
-    }
-
+int usb_control_scan_device(device_info_t* devices, int max_devices) {
     libusb_device** devs;
-    libusb_device* dev;
-    struct libusb_device_descriptor desc;
-    ssize_t cnt;
-    int r, i = 0;
-    int found = 0;
-    
-    // Get device list
-    cnt = libusb_get_device_list(ctx, &devs);
+    ssize_t cnt = fn_get_device_list(ctx, &devs);
     if (cnt < 0) {
-        printf("Get Device Error: %s\n", libusb_error_name((int)cnt));
+        printf("Failed to get device list: error code %d\n", (int)cnt);
         return (int)cnt;
     }
-    printf("Found %d USB devices\n", (int)cnt);
-    
-    // Find our devices by VID/PID
-    while ((dev = devs[i++]) != NULL && found < max_devices) {
-        r = libusb_get_device_descriptor(dev, &desc);
+
+    int found = 0;
+    for (ssize_t i = 0; i < cnt && found < max_devices; i++) {
+        struct libusb_device_descriptor desc;
+        int r = fn_get_device_descriptor(devs[i], &desc);
         if (r < 0) {
-            printf("Failed to get device descriptor: %s\n", libusb_error_name(r));
+            printf("Failed to get device descriptor: error code %d\n", r);
             continue;
         }
 
-        // Check if this is our target device by VID/PID
         if (desc.idVendor == VENDOR_ID && desc.idProduct == PRODUCT_ID) {
             libusb_device_handle* handle;
-            r = libusb_open(dev, &handle);
+            r = fn_open(devs[i], &handle);
             if (r < 0) {
-                printf("Device %d: VID=0x%04x, PID=0x%04x (Cannot open device: %s)\n", 
-                       found + 1, desc.idVendor, desc.idProduct, libusb_error_name(r));
+                printf("Failed to open device: error code %d\n", r);
                 continue;
             }
 
-            device_info_t* dev_info = &devices[found];
-            memset(dev_info, 0, sizeof(device_info_t));
-
-            // Get manufacturer string
-            r = get_string_descriptor(handle, desc.iManufacturer, (unsigned char*)dev_info->manufacturer, sizeof(dev_info->manufacturer));
-            
-            // Get product string
-            r = get_string_descriptor(handle, desc.iProduct, (unsigned char*)dev_info->product, sizeof(dev_info->product));
-            
             // Get serial number
-            r = get_string_descriptor(handle, desc.iSerialNumber, (unsigned char*)dev_info->serial, sizeof(dev_info->serial));
-            
-            libusb_close(handle);
-            
+            r = get_string_descriptor(handle, desc.iSerialNumber, devices[found].serial, sizeof(devices[found].serial));
             if (r < 0) {
+                fn_close(handle);
                 continue;
             }
 
-            // printf("Device %d:\n", found + 1);
-            // printf("  VID/PID: 0x%04x/0x%04x\n", desc.idVendor, desc.idProduct);
-            // printf("  Manufacturer: %s\n", dev_info->manufacturer);
-            // printf("  Product: %s\n", dev_info->product);
-            // printf("  S/N: %s\n", dev_info->serial);
-            // printf("\n");
+            // Get manufacturer
+            r = get_string_descriptor(handle, desc.iManufacturer, devices[found].manufacturer, sizeof(devices[found].manufacturer));
+            if (r < 0) {
+                fn_close(handle);
+                continue;
+            }
 
+            // Get product
+            r = get_string_descriptor(handle, desc.iProduct, devices[found].product, sizeof(devices[found].product));
+            if (r < 0) {
+                fn_close(handle);
+                continue;
+            }
+
+            fn_close(handle);
             found++;
         }
     }
 
-    // Free device list
-    libusb_free_device_list(devs, 1);
-    
-    if (found == 0) {
-        printf("No matching devices found\n");
-        return LIBUSB_ERROR_NOT_FOUND;
-    }
-    
-    printf("Found %d matching device(s)\n", found);
+    fn_free_device_list(devs, 1);
     return found;
 }
 
-/* 打开SN */
-int USB_OpenDevice(const char* target_serial) {
-    libusb_device** devs;
-    libusb_device* dev;
-    struct libusb_device_descriptor desc;
-    ssize_t cnt;
-    int r, i = 0;
-    unsigned char string[MAX_STR_LENGTH];
-    int found = 0;
-    
-    // Get device list
-    cnt = libusb_get_device_list(ctx, &devs);
-    if (cnt < 0) {
-        printf("Get Device Error: %s\n", libusb_error_name((int)cnt));
-        return (int)cnt;
+int usb_control_open_device(const char* target_serial) {
+    if (!target_serial) return LIBUSB_ERROR_INVALID_PARAM;
+
+    // 检查设备是否已经打开
+    device_instance_t* instance = find_device_instance(target_serial);
+    if (instance && instance->handle) {
+        return LIBUSB_ERROR_BUSY;  // 设备已经打开
     }
-    
-    // Find our device by VID/PID and serial
-    while ((dev = devs[i++]) != NULL) {
-        r = libusb_get_device_descriptor(dev, &desc);
-        if (r < 0) {
+
+    // 获取设备列表
+    libusb_device** device_list;
+    ssize_t device_count = fn_get_device_list(NULL, &device_list);
+    if (device_count < 0) {
+        return (int)device_count;
+    }
+
+    int result = LIBUSB_ERROR_NOT_FOUND;
+    libusb_device_handle* handle = NULL;
+    struct libusb_device_descriptor desc;
+    unsigned char string_desc[256];
+
+    // 遍历设备列表
+    for (ssize_t i = 0; i < device_count; i++) {
+        // 获取设备描述符
+        result = fn_get_device_descriptor(device_list[i], &desc);
+        if (result < 0) continue;
+
+        // 检查 VID/PID
+        if (desc.idVendor != VENDOR_ID || desc.idProduct != PRODUCT_ID) continue;
+
+        // 打开设备
+        result = fn_open(device_list[i], &handle);
+        if (result < 0) continue;
+
+        // 获取序列号
+        result = fn_get_string_descriptor_ascii(handle, desc.iSerialNumber, string_desc, sizeof(string_desc));
+        if (result < 0) {
+            fn_close(handle);
             continue;
         }
 
-        // Check if this is our target device by VID/PID
-        if (desc.idVendor == VENDOR_ID && desc.idProduct == PRODUCT_ID) {
-            libusb_device_handle* handle;
-            r = libusb_open(dev, &handle);
-            if (r < 0) {
-                continue;
-            }
-
-            // Get serial number
-            memset(string, 0, sizeof(string));
-            r = get_string_descriptor(handle, desc.iSerialNumber, string, sizeof(string));
-            if (r < 0) {
-                libusb_close(handle);
-                continue;
-            }
-
-            // Check if this is our target device
-            if (target_serial == NULL || strcmp((char*)string, target_serial) == 0) {
-                printf("Opening device with S/N: %s\n", string);
-
-                // Set configuration
-                r = libusb_set_configuration(handle, 1);
-                if (r < 0) {
-                    printf("Failed to set configuration: %s\n", libusb_error_name(r));
-                    libusb_close(handle);
-                    libusb_free_device_list(devs, 1);
-                    return r;
-                }
-
-                // Claim interface
-                r = libusb_claim_interface(handle, 0);
-                if (r < 0) {
-                    printf("Failed to claim interface: %s\n", libusb_error_name(r));
-                    libusb_close(handle);
-                    libusb_free_device_list(devs, 1);
-                    return r;
-                }
-
-                // Save handle and send open command
-                dev_handle = handle;
-                printf("Sending open command...\n");
-                unsigned char data = 0x01;
-                int transferred;
-                r = libusb_bulk_transfer(dev_handle, 0x01, &data, 1, &transferred, 0);
-                if (r < 0) {
-                    printf("Failed to send open command: %s\n", libusb_error_name(r));
-                    USB_CloseDevice();
-                    libusb_free_device_list(devs, 1);
-                    return r;
-                }
-                printf("Device opened successfully (transferred %d bytes)\n", transferred);
-
-                // Free device list and return success
-                libusb_free_device_list(devs, 1);
-                return 0;
-            }
-
-            // Not our target device, close it
-            libusb_close(handle);
-            found++;
-        }
-    }
-
-    // Free device list
-    libusb_free_device_list(devs, 1);
-    printf("Target device not found\n");
-    return LIBUSB_ERROR_NOT_FOUND;
-}
-
-/* 关闭设备 */
-int usb_control_open(const char* target_serial) {
-    libusb_device** devs;
-    libusb_device* dev;
-    struct libusb_device_descriptor desc;
-    ssize_t cnt;
-    int r, i = 0;
-    unsigned char string[MAX_STR_LENGTH];
-    
-    // Get device list
-    cnt = libusb_get_device_list(ctx, &devs);
-    if (cnt < 0) {
-        printf("Get Device Error: %s\n", libusb_error_name((int)cnt));
-        return (int)cnt;
-    }
-    printf("Found %d devices\n", (int)cnt);
-    
-    // Find our device
-    while ((dev = devs[i++]) != NULL) {
-        r = libusb_get_device_descriptor(dev, &desc);
-        if (r < 0) {
-            printf("Failed to get device descriptor: %s\n", libusb_error_name(r));
-            continue;
-        }
-
-        // Check if this is our target device by VID/PID
-        if (desc.idVendor == VENDOR_ID && desc.idProduct == PRODUCT_ID) {
-            libusb_device_handle* handle;
-            r = libusb_open(dev, &handle);
-            if (r < 0) {
-                printf(" (Cannot open device: %s)\n", libusb_error_name(r));
-                continue;
-            }
-
-            // Set configuration and claim interface
-            r = libusb_set_configuration(handle, 1);
-            if (r < 0) {
-                printf("\n  Failed to set configuration: %s", libusb_error_name(r));
-                libusb_close(handle);
-                continue;
-            }
-
-            r = libusb_claim_interface(handle, 0);
-            if (r < 0) {
-                printf("\n  Failed to claim interface: %s", libusb_error_name(r));
-                libusb_close(handle);
-                continue;
-            }
-
-            // Get serial number
-            memset(string, 0, sizeof(string));
-            r = get_string_descriptor(handle, desc.iSerialNumber, string, sizeof(string));
-            if (r < 0) {
-                libusb_release_interface(handle, 0);
-                libusb_close(handle);
-                continue;
-            }
-
-            printf(", S/N: %s", string);
-
-            // Check if this is our target device by serial number
-            if (target_serial == NULL || strcmp((char*)string, target_serial) == 0) {
-                printf("\nFound target device!\n");
-                dev_handle = handle;  // Save the handle
+        // 比较序列号
+        if (strcmp((char*)string_desc, target_serial) == 0) {
+            // 找到目标设备
+            result = fn_set_configuration(handle, 1);
+            if (result < 0) {
+                fn_close(handle);
                 break;
             }
 
-            // Not our target device, close it
-            libusb_release_interface(handle, 0);
-            libusb_close(handle);
+            result = fn_claim_interface(handle, 0);
+            if (result < 0) {
+                fn_close(handle);
+                break;
+            }
+
+            // 保存设备实例
+            instance = get_free_instance();
+            if (!instance) {
+                fn_close(handle);
+                result = LIBUSB_ERROR_NO_MEM;
+                break;
+            }
+
+            instance->handle = handle;
+            strncpy(instance->serial, target_serial, MAX_STR_LENGTH - 1);
+            instance->serial[MAX_STR_LENGTH - 1] = '\0';
+            instance->in_use = 1;
+            ring_buffer_init(&instance->rx_buffer);
+
+            // 立即启动接收线程
+            result = usb_control_start_rx(target_serial);
+            if (result < 0) {
+                fn_close(handle);
+                instance->handle = NULL;
+                instance->in_use = 0;
+                break;
+            }
+
+            result = LIBUSB_SUCCESS;
+            break;
         }
-        printf("\n");
+
+        fn_close(handle);
     }
 
-    // Free device list
-    libusb_free_device_list(devs, 1);
-
-    if (dev_handle == NULL) {
-        printf("Target device not found\n");
-        return LIBUSB_ERROR_NOT_FOUND;
-    }
-
-    // Send open command
-    printf("Sending open command...\n");
-    unsigned char data = 0x01;
-    int transferred;
-    r = libusb_bulk_transfer(dev_handle, 0x01, &data, 1, &transferred, 0);
-    if (r < 0) {
-        printf("Failed to send open command: %s\n", libusb_error_name(r));
-        USB_CloseDevice();
-        return r;
-    }
-    printf("Device opened successfully (transferred %d bytes)\n", transferred);
-
-    return 0;
+    fn_free_device_list(device_list, 1);
+    return result;
 }
 
-/* 从设备读取数据 */
-int usb_control_read(unsigned char* data, int length, int* transferred) {
-    if (!dev_handle) {
+int usb_control_close_device(const char* target_serial) {
+    device_instance_t* dev = find_device_instance(target_serial);
+    if (!dev || !dev->in_use) return LIBUSB_ERROR_NO_DEVICE;
+
+    // 停止接收线程
+    if (dev->rx_thread) {
+        dev->rx_running = 0;
+        WaitForSingleObject(dev->rx_thread, INFINITE);
+        CloseHandle(dev->rx_thread);
+        dev->rx_thread = NULL;
+    }
+
+    fn_release_interface(dev->handle, 0);
+    fn_close(dev->handle);
+    dev->handle = NULL;
+    dev->in_use = 0;
+
+    return LIBUSB_SUCCESS;
+}
+
+int usb_control_read(const char* target_serial, unsigned char* data, int length, int* transferred) {
+    if (!target_serial || !data || !transferred) {
+        return LIBUSB_ERROR_INVALID_PARAM;
+    }
+
+    device_instance_t* instance = find_device_instance(target_serial);
+    if (!instance) {
         return LIBUSB_ERROR_NO_DEVICE;
     }
 
-    return libusb_bulk_transfer(dev_handle, 0x81, data, length, transferred, 1000);  // 1秒超时
+    // 从环形缓冲区读取数据
+    *transferred = ring_buffer_read(&instance->rx_buffer, data, length);
+    return LIBUSB_SUCCESS;
 }
 
-/* 关闭设备 */
-int USB_CloseDevice(void) {
-    if (!dev_handle) {
-        return LIBUSB_ERROR_NOT_FOUND;
+int usb_control_start_rx(const char* target_serial) {
+    device_instance_t* dev = find_device_instance(target_serial);
+    if (!dev || !dev->handle) return LIBUSB_ERROR_NO_DEVICE;
+
+    if (dev->rx_thread) return LIBUSB_ERROR_BUSY;  // 已经在运行
+
+    dev->rx_running = 1;
+    dev->rx_thread = CreateThread(NULL, 0, rx_thread_func, dev, 0, NULL);
+    if (!dev->rx_thread) {
+        dev->rx_running = 0;
+        return LIBUSB_ERROR_OTHER;
     }
 
-    // Send close command
-    unsigned char data = 0;
-    int transferred;
-    printf("Sending close command...\n");
-    
-    int r = libusb_bulk_transfer(dev_handle, 0x01, &data, 1, &transferred, 0);
-    if (r == 0) {
-        printf("Device closed successfully (transferred %d bytes)\n", transferred);
-    } else {
-        printf("Error in bulk transfer: %s\n", libusb_error_name(r));
-    }
+    return LIBUSB_SUCCESS;
+}
 
-    libusb_release_interface(dev_handle, 0);
-    libusb_close(dev_handle);
-    dev_handle = NULL;
+int usb_control_stop_rx(const char* target_serial) {
+    device_instance_t* dev = find_device_instance(target_serial);
+    if (!dev || !dev->handle) return LIBUSB_ERROR_NO_DEVICE;
 
-    return r;
+    if (!dev->rx_thread) return LIBUSB_SUCCESS;  // 已经停止
+
+    dev->rx_running = 0;
+    WaitForSingleObject(dev->rx_thread, INFINITE);
+    CloseHandle(dev->rx_thread);
+    dev->rx_thread = NULL;
+
+    return LIBUSB_SUCCESS;
 }
