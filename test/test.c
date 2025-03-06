@@ -36,7 +36,7 @@ int main() {
     printf("\nDevice opened successfully\n");
 
     // 读取数据
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 1; i++) {
         result = USB_ReadData(data, sizeof(data), &bytes_transferred);
         if (result < 0) {
             printf("Failed to read data (error code: %d)\n", result);
