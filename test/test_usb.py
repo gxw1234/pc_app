@@ -17,32 +17,44 @@ def main():
         print(f"Failed to load DLL: {e}")
         return
 
+    # ===================扫描USB设备==================================
+    # max_devices: 最大扫描设备数量
+    # DeviceInfo: USB设备信息
+    # USB_ScanDevice: 开始扫描
+    #
+    # Returns:
+    #   num_devices: 扫描USB个数
+    # ==============================================================
     max_devices = 16
     devices = (DeviceInfo * max_devices)()
-    dll.USB_ScanDevice.argtypes = [POINTER(DeviceInfo), c_int]
-    dll.USB_ScanDevice.restype = c_int
-    num_devices = dll.USB_ScanDevice(devices, max_devices)
 
+    num_devices = dll.USB_ScanDevice(devices, max_devices)
     if num_devices <= 0:
         print(f"No devices found (error code: {num_devices})")
         return
     print(f"Found {num_devices} device(s)")
-
     for i in range(num_devices):
         print(f"\nDevice {i + 1}:")
         print(f"  Serial: {devices[i].serial.decode('utf-8')}")
         print(f"  Manufacturer: {devices[i].manufacturer.decode('utf-8')}")
         print(f"  Product: {devices[i].product.decode('utf-8')}")
 
-    # 打开第一个设备
-    dll.USB_OpenDevice.argtypes = [c_char_p]
-    dll.USB_OpenDevice.restype = c_int
+
+    # ===================打开USB设备==================================
+    # USB_OpenDevice: 打开设备
+    # devices[0].serial: 扫描出来的设备号， 如果有已知的设备号可以转换  "xxxxxxxxx".encode()
+    # USB_ScanDevice: 开始扫描
+    #
+    # Returns:
+    #   result: 打开的结果
+    # ==============================================================
+
     result = dll.USB_OpenDevice(devices[0].serial)
+    print(f'result:{result}')
     # result = dll.USB_OpenDevice("345E34593133".encode())  # 使用 encode() 转换字符串
     if result < 0:
         print(f"Failed to open device (error code: {result})")
         return
-
     print("\nDevice opened successfully")
 
     try:
